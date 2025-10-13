@@ -648,7 +648,11 @@ enum IntentFutureUsage {
 }
 
 typedef ConfirmHandler =
-    void Function(PaymentMethod result, bool shouldSavePaymentMethod);
+    void Function(
+      PaymentMethod result,
+      bool shouldSavePaymentMethod,
+      void Function(IntentCreationCallbackParams) intentCreationCallback,
+    );
 
 typedef ConfirmTokenHandler = void Function(ConfirmationTokenResult result);
 
@@ -861,6 +865,7 @@ abstract class FlatConfig with _$FlatConfig {
 /// Describes the appearance of the floating button style payment method row
 @freezed
 abstract class FloatingConfig with _$FloatingConfig {
+  @JsonSerializable(explicitToJson: true)
   const factory FloatingConfig({
     /// The spacing between payment method rows.
     double? spacing,
@@ -873,6 +878,7 @@ abstract class FloatingConfig with _$FloatingConfig {
 /// Describes the appearance of the row in the Embedded Mobile Payment Element
 @freezed
 abstract class RowConfig with _$RowConfig {
+  @JsonSerializable(explicitToJson: true)
   const factory RowConfig({
     /// The display style of the row.
     RowStyle? style,
@@ -897,6 +903,7 @@ abstract class RowConfig with _$RowConfig {
 @freezed
 abstract class EmbeddedPaymentElementAppearance
     with _$EmbeddedPaymentElementAppearance {
+  @JsonSerializable(explicitToJson: true)
   const factory EmbeddedPaymentElementAppearance({RowConfig? row}) =
       _EmbeddedPaymentElementAppearance;
 

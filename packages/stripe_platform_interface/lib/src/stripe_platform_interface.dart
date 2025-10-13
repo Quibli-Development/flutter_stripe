@@ -196,6 +196,9 @@ abstract class StripePlatform extends PlatformInterface {
     IntentCreationCallbackParams params,
   );
 
+  /// Set the confirm handler for embedded payment elements
+  void setConfirmHandler(ConfirmHandler? handler);
+
   Widget buildCard({
     Key? key,
     required CardEditController controller,

@@ -1,3 +1,6 @@
+import 'dart:io';
+
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:stripe_platform_interface/src/models/ach_params.dart';
@@ -74,6 +77,9 @@ class MethodChannelStripe extends StripePlatform {
         _confirmHandler!(
           method,
           call.arguments['shouldSavePaymentMethod'] as bool,
+          (params) {
+            intentCreationCallback(params);
+          },
         );
       } else if (call.method == 'onConfirmationTokenHandlerCallback' &&
           _confirmTokenHandler != null) {
@@ -743,6 +749,11 @@ class MethodChannelStripe extends StripePlatform {
     await _methodChannel.invokeMethod('confirmationTokenCreationCallback', {
       'params': params.toJson(),
     });
+  }
+
+  @override
+  void setConfirmHandler(ConfirmHandler? handler) {
+    _confirmHandler = handler;
   }
 
   @override
