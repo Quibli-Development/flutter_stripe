@@ -114,6 +114,7 @@ class _EmbeddedPaymentElementState extends State<EmbeddedPaymentElement>
   Completer<Map<String, dynamic>?>? _pendingUpdate;
   Completer<Map<String, dynamic>?>? _pendingConfirm;
   double _currentHeight = 0;
+  bool _animateHeightChange = false;
   bool _showPlatformView = true;
 
   @override
@@ -244,9 +245,14 @@ class _EmbeddedPaymentElementState extends State<EmbeddedPaymentElement>
           if (arguments != null) {
             final height = (arguments['height'] as num?)?.toDouble() ?? 0;
             if (height <= 0) return;
+            if (_currentHeight > 0 && (height - _currentHeight).abs() <= 1) {
+              return;
+            }
 
+            final animateHeightChange = _currentHeight > 0;
             setState(() {
               _currentHeight = height;
+              _animateHeightChange = animateHeightChange;
             });
             widget.onHeightChanged?.call(height);
           }
@@ -387,14 +393,45 @@ class _EmbeddedPaymentElementState extends State<EmbeddedPaymentElement>
       );
     }
 
+    final height = _currentHeight > 0 ? _currentHeight : 400.0;
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth.isFinite
+              ? constraints.maxWidth
+              : MediaQuery.sizeOf(context).width;
+
+          return ClipRect(
+            child: AnimatedContainer(
+              duration: _animateHeightChange
+                  ? const Duration(milliseconds: 300)
+                  : Duration.zero,
+              curve: Curves.easeInOut,
+              height: height,
+              alignment: Alignment.topCenter,
+              child: OverflowBox(
+                alignment: Alignment.topCenter,
+                minWidth: width,
+                maxWidth: width,
+                minHeight: height,
+                maxHeight: height,
+                child: SizedBox(
+                  width: width,
+                  height: height,
+                  child: platformView,
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    }
+
     return AnimatedSize(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOut,
       alignment: Alignment.topCenter,
-      child: SizedBox(
-        height: _currentHeight > 0 ? _currentHeight : 400,
-        child: platformView,
-      ),
+      child: SizedBox(height: height, child: platformView),
     );
   }
 
@@ -507,15 +544,12 @@ class _UiKitEmbeddedPaymentElement extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRect(
-      clipBehavior: Clip.hardEdge,
-      child: RepaintBoundary(
-        child: UiKitView(
-          viewType: viewType,
-          creationParamsCodec: const StandardMessageCodec(),
-          creationParams: creationParams,
-          onPlatformViewCreated: onPlatformViewCreated,
-        ),
+    return RepaintBoundary(
+      child: UiKitView(
+        viewType: viewType,
+        creationParamsCodec: const StandardMessageCodec(),
+        creationParams: creationParams,
+        onPlatformViewCreated: onPlatformViewCreated,
       ),
     );
   }

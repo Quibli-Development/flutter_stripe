@@ -5,56 +5,136 @@ import Stripe
 @_spi(EmbeddedPaymentElementPrivateBeta) import StripePaymentSheet
 
 class FlutterEmbeddedPaymentElementContainerView: UIView {
-    weak var channel: FlutterMethodChannel?
-    weak var paymentElementView: UIView?
-    private var lastReportedHeight: CGFloat = 0
-    private var isReportingHeight = false
+    weak var embeddedElement: EmbeddedPaymentElement?
+    var onAttached: ((EmbeddedPaymentElement) -> Void)?
+    var onNeedsHeightReport: ((EmbeddedPaymentElement, CGFloat) -> Void)?
+    private weak var paymentElementView: UIView?
+    private var activeConstraints: [NSLayoutConstraint] = []
+    private var lastReportedBounds: CGRect = .zero
+    private var lastReportedLayoutMargins: UIEdgeInsets = .zero
+    private var lastReportedSafeAreaInsets: UIEdgeInsets = .zero
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
         clipsToBounds = true
+        Self.configureLayoutMargins(for: self)
     }
 
     required init?(coder: NSCoder) {
         fatalError()
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        reportHeightIfNeeded()
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            attachPaymentElementIfAvailable()
+            requestHeightReport()
+        }
     }
 
-    private func reportHeightIfNeeded() {
-        guard !isReportingHeight else { return }
-        guard let channel = channel else { return }
-        guard window != nil else { return }
-        guard let paymentView = paymentElementView else { return }
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        if newWindow == nil {
+            removePaymentElement()
+        }
+    }
 
-        isReportingHeight = true
-        defer { isReportingHeight = false }
+    func configure(embeddedElement: EmbeddedPaymentElement) {
+        self.embeddedElement = embeddedElement
+        attachPaymentElementIfAvailable()
+    }
 
-        // Primary path: use payment view's bounds.height after layout (no extra AutoLayout pass)
-        var height = paymentView.bounds.height
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let embeddedElement = embeddedElement {
+            updatePresentingViewController(for: embeddedElement)
+        }
+        if let paymentElementView = paymentElementView {
+            Self.configureLayoutMarginsRecursively(for: paymentElementView)
+        }
+        requestHeightReport()
+    }
 
-        // Fallback: only if payment view bounds not yet set (first layout)
-        if height == 0 {
-            let width = bounds.width > 0 ? bounds.width : paymentView.bounds.width
-            guard width > 0 else { return }
-            height = paymentView.systemLayoutSizeFitting(
-                CGSize(width: width, height: UIView.layoutFittingCompressedSize.height),
-                withHorizontalFittingPriority: .required,
-                verticalFittingPriority: .fittingSizeLevel
-            ).height
+    override func layoutMarginsDidChange() {
+        super.layoutMarginsDidChange()
+        requestHeightReport(force: true)
+    }
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        requestHeightReport(force: true)
+    }
+
+    private func attachPaymentElementIfAvailable() {
+        guard paymentElementView == nil,
+              let embeddedElement = embeddedElement,
+              window != nil else { return }
+
+        let paymentElementView = embeddedElement.view
+        Self.configureLayoutMarginsRecursively(for: paymentElementView)
+        if paymentElementView.superview !== self {
+            paymentElementView.removeFromSuperview()
+            addSubview(paymentElementView)
+        }
+        paymentElementView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Flutter owns the visible height; pinning the bottom compresses Stripe's
+        // internal rows during height transitions.
+        activeConstraints = [
+            paymentElementView.topAnchor.constraint(equalTo: topAnchor),
+            paymentElementView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            paymentElementView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ]
+        NSLayoutConstraint.activate(activeConstraints)
+
+        self.paymentElementView = paymentElementView
+        updatePresentingViewController(for: embeddedElement)
+        onAttached?(embeddedElement)
+        requestHeightReport(force: true)
+    }
+
+    private func removePaymentElement() {
+        NSLayoutConstraint.deactivate(activeConstraints)
+        activeConstraints.removeAll()
+        paymentElementView?.removeFromSuperview()
+        paymentElementView = nil
+    }
+
+    private func updatePresentingViewController(for embeddedElement: EmbeddedPaymentElement) {
+        if let viewController = window?.rootViewController {
+            embeddedElement.presentingViewController = viewController
+        }
+    }
+
+    private func requestHeightReport(force: Bool = false) {
+        guard let embeddedElement = embeddedElement,
+              window != nil,
+              bounds.width > 0 else { return }
+
+        if !force,
+           bounds == lastReportedBounds,
+           layoutMargins == lastReportedLayoutMargins,
+           safeAreaInsets == lastReportedSafeAreaInsets {
+            return
         }
 
-        guard height > 0 else { return }
-        guard abs(height - lastReportedHeight) > 1.0 else { return }
+        lastReportedBounds = bounds
+        lastReportedLayoutMargins = layoutMargins
+        lastReportedSafeAreaInsets = safeAreaInsets
+        onNeedsHeightReport?(embeddedElement, bounds.width)
+    }
 
-        lastReportedHeight = height
-        DispatchQueue.main.async { [weak channel, height] in
-            channel?.invokeMethod("onHeightChanged", arguments: ["height": height])
-        }
+    private static func configureLayoutMargins(for view: UIView) {
+        view.insetsLayoutMarginsFromSafeArea = false
+        view.preservesSuperviewLayoutMargins = false
+        view.layoutMargins = .zero
+        view.directionalLayoutMargins = .zero
+    }
+
+    private static func configureLayoutMarginsRecursively(for view: UIView) {
+        configureLayoutMargins(for: view)
+        view.subviews.forEach { configureLayoutMarginsRecursively(for: $0) }
     }
 }
 
@@ -183,36 +263,18 @@ class EmbeddedPaymentElementPlatformView: NSObject, FlutterPlatformView {
 
     @MainActor
     private func attachEmbeddedView(_ embeddedElement: EmbeddedPaymentElement) {
-        // Connect container to channel for height reporting via layoutSubviews
-        embeddedView.channel = channel
-
-        delegate = FlutterEmbeddedPaymentElementDelegate(channel: channel, containerView: embeddedView)
+        delegate = FlutterEmbeddedPaymentElementDelegate(channel: channel)
         embeddedElement.delegate = delegate
-
-        let paymentElementView = embeddedElement.view
-        embeddedView.addSubview(paymentElementView)
-        embeddedView.paymentElementView = paymentElementView
-        paymentElementView.translatesAutoresizingMaskIntoConstraints = false
-
-        // Let Stripe's view size itself naturally via intrinsic content size
-        paymentElementView.setContentHuggingPriority(.required, for: .vertical)
-        paymentElementView.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        // Only pin 3 edges - no bottom constraint so height is driven by content
-        NSLayoutConstraint.activate([
-            paymentElementView.topAnchor.constraint(equalTo: embeddedView.topAnchor),
-            paymentElementView.leadingAnchor.constraint(equalTo: embeddedView.leadingAnchor),
-            paymentElementView.trailingAnchor.constraint(equalTo: embeddedView.trailingAnchor),
-        ])
-
-        if let viewController = embeddedView.window?.rootViewController {
-            embeddedElement.presentingViewController = viewController
+        embeddedView.onAttached = { [weak self] embeddedElement in
+            self?.delegate?.reportPaymentOption(embeddedPaymentElement: embeddedElement)
         }
-
-        // Trigger initial layout to report height (async to avoid synchronous layout)
-        embeddedView.setNeedsLayout()
-
-        delegate?.embeddedPaymentElementDidUpdatePaymentOption(embeddedPaymentElement: embeddedElement)
+        embeddedView.onNeedsHeightReport = { [weak self] embeddedElement, fallbackWidth in
+            self?.delegate?.scheduleReportHeight(
+                embeddedPaymentElement: embeddedElement,
+                fallbackWidth: fallbackWidth
+            )
+        }
+        embeddedView.configure(embeddedElement: embeddedElement)
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -265,6 +327,12 @@ class EmbeddedPaymentElementPlatformView: NSObject, FlutterPlatformView {
                 mutableIntentConfig["confirmHandler"] = true
             }
             stripeSdk.updateEmbeddedPaymentElement(intentConfig: mutableIntentConfig) { payload in
+                if let embeddedElement = self.stripeSdk.embeddedInstance {
+                    self.delegate?.scheduleReportHeight(
+                        embeddedPaymentElement: embeddedElement,
+                        fallbackWidth: self.embeddedView.bounds.width
+                    )
+                }
                 result(payload)
             } reject: { code, message, error in
                 result(FlutterError(code: code, message: message, details: nil))
@@ -282,26 +350,59 @@ class EmbeddedPaymentElementPlatformView: NSObject, FlutterPlatformView {
 
 class FlutterEmbeddedPaymentElementDelegate: EmbeddedPaymentElementDelegate {
     weak var channel: FlutterMethodChannel?
-    weak var containerView: FlutterEmbeddedPaymentElementContainerView?
+    private var lastReportedHeight: CGFloat = 0
+    private var pendingHeightReport = false
 
-    init(channel: FlutterMethodChannel, containerView: FlutterEmbeddedPaymentElementContainerView) {
+    init(channel: FlutterMethodChannel) {
         self.channel = channel
-        self.containerView = containerView
     }
 
     func embeddedPaymentElementDidUpdateHeight(embeddedPaymentElement: StripePaymentSheet.EmbeddedPaymentElement) {
-        // Mark layout as dirty - the container's layoutSubviews will report the height
-        // No synchronous layoutIfNeeded() to avoid forcing layout passes
-        DispatchQueue.main.async { [weak self] in
-            self?.containerView?.setNeedsLayout()
+        scheduleReportHeight(embeddedPaymentElement: embeddedPaymentElement)
+    }
+
+    func scheduleReportHeight(embeddedPaymentElement: StripePaymentSheet.EmbeddedPaymentElement, fallbackWidth: CGFloat = 0) {
+        guard !pendingHeightReport else { return }
+        pendingHeightReport = true
+        DispatchQueue.main.async { [weak self, weak embeddedPaymentElement] in
+            guard let self = self else { return }
+            self.pendingHeightReport = false
+            guard let embeddedPaymentElement = embeddedPaymentElement else { return }
+            self.reportHeightIfChanged(embeddedPaymentElement: embeddedPaymentElement, fallbackWidth: fallbackWidth)
         }
     }
 
-    func embeddedPaymentElementDidUpdatePaymentOption(embeddedPaymentElement: EmbeddedPaymentElement) {
+    private func reportHeightIfChanged(embeddedPaymentElement: StripePaymentSheet.EmbeddedPaymentElement, fallbackWidth: CGFloat = 0) {
+        guard let channel = channel else { return }
+
+        let width = embeddedPaymentElement.view.bounds.width > 0
+            ? embeddedPaymentElement.view.bounds.width
+            : fallbackWidth
+        guard width > 0 else { return }
+
+        let height = embeddedPaymentElement.view.systemLayoutSizeFitting(
+            CGSize(width: width, height: UIView.layoutFittingCompressedSize.height),
+            withHorizontalFittingPriority: .required,
+            verticalFittingPriority: .fittingSizeLevel
+        ).height
+
+        guard height > 0 else { return }
+        guard abs(height - lastReportedHeight) > 1.0 else { return }
+
+        lastReportedHeight = height
+        channel.invokeMethod("onHeightChanged", arguments: ["height": height])
+    }
+
+    func reportPaymentOption(embeddedPaymentElement: EmbeddedPaymentElement) {
         guard let channel = channel else { return }
 
         let displayDataDict = embeddedPaymentElement.paymentOption?.toDictionary()
         channel.invokeMethod("onPaymentOptionChanged", arguments: ["paymentOption": displayDataDict as Any])
+    }
+
+    func embeddedPaymentElementDidUpdatePaymentOption(embeddedPaymentElement: EmbeddedPaymentElement) {
+        reportPaymentOption(embeddedPaymentElement: embeddedPaymentElement)
+        scheduleReportHeight(embeddedPaymentElement: embeddedPaymentElement)
     }
 
     func embeddedPaymentElementWillPresent(embeddedPaymentElement: EmbeddedPaymentElement) {
